@@ -1,0 +1,45 @@
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  ⡠⣒⠄  ⡔⢄⠔⡄
+ ⢸⠸⣀⡔⢉⠱⣃⡢⣂⡣
+  ⠉⠒⠣⠤⠵⠤⠬⠮⠆
+
+Mistral Vibe v2.25.8 · GLM-5.3 (Mistral Hosted)[high] · unified harness · [Subscription] Pro
+3 models · 2/16 connectors · 0 MCP servers · 1 skill
+Type /help for more information
+
+  ⎣ Error: Failed to resume session: Session not found: 00000000-dead-beef-0000-000000000000
+You are using our new unified harness. If you encounter issues, restart with --legacy-harness.
+
+
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── accept edits ─
+>
+
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+~/fleet/vibe-scratch [PID 16888]                                                                                                              0/800k tokens (0%)
