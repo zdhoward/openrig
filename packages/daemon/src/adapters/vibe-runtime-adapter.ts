@@ -69,7 +69,10 @@ async function withCaptureMutex<T>(key: string, fn: () => Promise<T>): Promise<T
 // and trust groups are pinned from verified production evidence; the ready
 // group is provisional until the prototype run pins exact TUI strings, and
 // updating it must only ever touch these patterns, never control flow.
-const AUTH_FAILURE_MARKERS = ["Not logged in", "Authentication required", "Invalid API key", "Unauthorized"];
+// "Let's get you started" is vibe 2.25.8's first-run onboarding wizard (no
+// credentials in VIBE_HOME) — pinned from test/fixtures/vibe/auth-required.txt;
+// its "Welcome to Mistral Vibe" banner would otherwise match READY_MARKERS.
+const AUTH_FAILURE_MARKERS = ["Not logged in", "Authentication required", "Invalid API key", "Unauthorized", "Let's get you started"];
 const TRUST_PROMPT_MARKERS = [/trust/i, /workspace/i, /folder/i, /directory/i];
 const READY_MARKERS = [/mistral vibe/i, /\binput\b.*\bprompt\b/i, /ctrl\+.*exit/i];
 
