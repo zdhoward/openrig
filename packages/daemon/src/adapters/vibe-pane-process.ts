@@ -54,3 +54,44 @@ export function pidOwnedByPane(rows: VibeProcessRow[], panePid: number, pid: num
   }
   return false;
 }
+
+export interface VibePaneProof {
+  panePid: number;
+  sessionId: string;
+  processId: number;
+}
+
+/** Positive proof that vibe (not a bare shell) occupies a pane: an active
+ *  session lock whose holder pid is in the pane's foreground lineage. The
+ *  daemon launches through a `/bin/sh <script>` wrapper, so pane_current_command
+ *  reads "sh" while vibe runs as its child — the label alone cannot tell a live
+ *  seat from a dead one. With `expectedSessionId`, only that session counts (a
+ *  pane running some OTHER vibe session is not the seat's recorded occupant).
+ *  Observed twice with an identical result, like the Codex lineage proof. */
+export async function proveVibeInPane(input: {
+  target: string;
+  tmux: { getPanePid(target: string): Promise<number | null> };
+  store: { listActiveSessions(): Array<{ sessionId: string; processId: number | null }> };
+  listProcesses?: VibeProcessLister;
+  expectedSessionId?: string | null;
+}): Promise<VibePaneProof | null> {
+  const observe = async (): Promise<VibePaneProof | null> => {
+    try {
+      const panePid = await input.tmux.getPanePid(input.target);
+      if (!panePid) return null;
+      const rows = await (input.listProcesses ?? listVibeProcessRows)();
+      const owned = input.store.listActiveSessions().filter((lock) =>
+        (!input.expectedSessionId || lock.sessionId === input.expectedSessionId)
+        && pidOwnedByPane(rows, panePid, lock.processId));
+      // Newest-first from the store; any owned lock proves occupancy.
+      const [lock] = owned;
+      return lock ? { panePid, sessionId: lock.sessionId, processId: lock.processId! } : null;
+    } catch {
+      return null;
+    }
+  };
+  const first = await observe();
+  if (!first) return null;
+  const second = await observe();
+  return second && second.panePid === first.panePid && second.processId === first.processId ? second : null;
+}

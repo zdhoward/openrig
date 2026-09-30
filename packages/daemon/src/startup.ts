@@ -1140,6 +1140,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
         slowOpRecorder,
         activityEndpointFile: () => readActivityEndpointFile(OPENRIG_HOME),
         captureObserver: shadow.capture?.observer,
+        vibePaneProof: (target, expectedSessionId) => vibeAdapter.provePaneOccupancy(target, expectedSessionId),
       });
       // PL-004 Phase A revision (R1): wire QueueRepository's wake-path so
       // create / handoff / handoff-and-complete nudge by default.

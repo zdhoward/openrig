@@ -39,7 +39,7 @@ import { validateResumeToken } from "../domain/resume-token-validation.js";
 import { mergeManagedBlock } from "../domain/managed-blocks.js";
 import { observeVibeAgentProfile } from "../domain/permission-drift.js";
 import { VibeSessionStore, type VibeSessionLock } from "./vibe-session-store.js";
-import { listVibeProcessRows, pidOwnedByPane, type VibeProcessLister } from "./vibe-pane-process.js";
+import { listVibeProcessRows, pidOwnedByPane, proveVibeInPane, type VibeProcessLister } from "./vibe-pane-process.js";
 
 const SHELL_COMMANDS = new Set(["bash", "fish", "nu", "sh", "tmux", "zsh"]);
 
@@ -296,7 +296,12 @@ export class VibeRuntimeAdapter implements RuntimeAdapter {
     // Guard fold: a dead vibe leaves the pane back at a shell — pane
     // scrollback or a stale lock never makes a stopped seat ready.
     const paneCommand = (await this.tmux.getPaneCommand(binding.tmuxSession)) ?? "";
-    const atShell = SHELL_COMMANDS.has(paneCommand);
+    // The daemon types launches through a `/bin/sh <script>` wrapper, so a
+    // LIVE seat also reads "sh" (live-verified). A shell label is exited only
+    // without positive proof: a session lock held from the pane's foreground
+    // lineage (same fix class as f8f3aff6 for Codex behind shell wrappers).
+    const atShell = SHELL_COMMANDS.has(paneCommand)
+      && !(await proveVibeInPane({ target: binding.tmuxSession, tmux: this.tmux, store: this.store, listProcesses: this.listProcesses }));
     if (atShell) {
       return { ready: false, reason: "the pane is back at a shell (vibe process gone)", code: "runtime_exited" };
     }
@@ -319,6 +324,13 @@ export class VibeRuntimeAdapter implements RuntimeAdapter {
       }
     }
     return { ready: false, reason: "vibe has not reported ready yet", code: "awaiting_runtime" };
+  }
+
+  /** Positive proof a live vibe holds a session from this pane (optionally
+   *  THE recorded session) — for daemon consumers that see the launch
+   *  wrapper's shell label (session transport). */
+  async provePaneOccupancy(target: string, expectedSessionId?: string | null): Promise<{ panePid: number } | null> {
+    return proveVibeInPane({ target, tmux: this.tmux, store: this.store, listProcesses: this.listProcesses, expectedSessionId });
   }
 
   // ── internals ──────────────────────────────────────────────────────────────

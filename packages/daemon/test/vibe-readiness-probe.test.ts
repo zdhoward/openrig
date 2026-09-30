@@ -4,6 +4,8 @@
 // strings. These tests pin the control flow, so a prototype only ever
 // updates the marker tables.
 
+import { readFileSync } from "node:fs";
+import nodePath from "node:path";
 import { describe, it, expect, vi } from "vitest";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 import { VibeRuntimeAdapter, type VibeAdapterFsOps } from "../src/adapters/vibe-runtime-adapter.js";
@@ -79,5 +81,73 @@ describe("vibe checkReady — the pane classifier", () => {
     const r = await adapterWith(mockTmux({ pane: "" })).checkReady({ ...SEAT });
     expect(r.ready).toBe(false);
     expect(r.code).toBe("awaiting_runtime");
+  });
+});
+
+// Live-verified shape (mistral-vibe 2.25.8 launched by the daemon): the pane
+// foreground is the /bin/sh launch wrapper, so a LIVE seat reads "sh".
+describe("vibe checkReady — daemon launch wrapper (live finding)", () => {
+  const SESSION = "3961f82a-6eb7-448b-13bc-17e011aad77e";
+  const LOCK_PATH = `${STORE_ROOT}/active/${SESSION}.lock.json`;
+  const ROWS = [
+    { pid: 100, ppid: 1, pgid: 100, tpgid: 200 },
+    { pid: 200, ppid: 100, pgid: 200, tpgid: 200 },
+    { pid: 201, ppid: 200, pgid: 200, tpgid: 200 },
+  ];
+  function wrapped(opts: { lockPid?: number | null; pane?: string }) {
+    const files: Record<string, string> = opts.lockPid === null ? {} : {
+      [LOCK_PATH]: `{"acquired_at":"2026-09-30T14:56:20.976Z","lease_version":1,"process_id":${opts.lockPid ?? 201},"session_id":"${SESSION}"}\n`,
+    };
+    const tmux = {
+      hasSession: vi.fn(async () => true),
+      getPaneCommand: vi.fn(async () => "sh"),
+      getPanePid: vi.fn(async () => 100),
+      capturePaneContent: vi.fn(async () => opts.pane ?? ""),
+    } as unknown as TmuxAdapter;
+    return new VibeRuntimeAdapter({
+      tmux, sessionStoreRoot: STORE_ROOT, sleep: async () => {}, listProcesses: () => ROWS,
+      fsOps: {
+        readFile: (p: string) => { if (!(p in files)) throw new Error("ENOENT"); return files[p]!; },
+        writeFile: () => {}, mkdirp: () => {},
+        exists: (p: string) => p in files,
+        readdir: (dir: string) => Object.keys(files).filter((f) => f.startsWith(`${dir}/`)).map((f) => f.slice(dir.length + 1)),
+      },
+    });
+  }
+
+  it("a live vibe behind the sh wrapper (its lock held from the pane) is NOT runtime_exited", async () => {
+    const r = await wrapped({ pane: fixture("ready.txt") }).checkReady({ ...SEAT });
+    expect(r.ready).toBe(true);
+  });
+
+  it("an sh label with no pane-held lock is still runtime_exited", async () => {
+    const r = await wrapped({ lockPid: null, pane: fixture("ready.txt") }).checkReady({ ...SEAT });
+    expect(r.code).toBe("runtime_exited");
+  });
+
+  it("an sh label with a lock held OUTSIDE the pane is still runtime_exited", async () => {
+    const r = await wrapped({ lockPid: 999, pane: fixture("ready.txt") }).checkReady({ ...SEAT });
+    expect(r.code).toBe("runtime_exited");
+  });
+});
+
+// Real pane captures (test/fixtures/vibe, mistral-vibe 2.25.8) through the
+// marker tables: the regression net for the TUI's actual strings.
+function fixture(name: string): string {
+  return readFileSync(nodePath.join(import.meta.dirname, "fixtures", "vibe", name), "utf-8");
+}
+
+describe("vibe checkReady — real 2.25.8 pane fixtures", () => {
+  it.each([
+    ["ready.txt", true, undefined],
+    ["resume-success.txt", true, undefined],
+    ["auth-required.txt", false, "auth_failure"],
+    ["auth-invalid-key.txt", false, "auth_failure"],
+    ["trust-gate.txt", false, "trust_gate"],
+  ])("%s -> ready=%s code=%s", async (name, ready, code) => {
+    const lines = fixture(name).split("\n");
+    const r = await adapterWith(mockTmux({ pane: lines.slice(-40).join("\n") })).checkReady({ ...SEAT });
+    expect(r.ready).toBe(ready);
+    if (code) expect(r.code).toBe(code);
   });
 });

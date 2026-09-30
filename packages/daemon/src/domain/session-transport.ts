@@ -545,6 +545,8 @@ interface SessionTransportDeps {
   /** S01/S02 P2: optional read-only capture observer. Absent by default (no activation). */
   captureObserver?: CaptureObserverSink;
   listProcesses?: NativeProcessLister;
+  /** Vibe occupancy proof (session lock held from the pane's foreground lineage). */
+  vibePaneProof?: (target: string, expectedSessionId: string | null) => Promise<{ panePid: number } | null>;
 }
 
 interface SessionRow { node_id: string; session_name: string; }
@@ -567,6 +569,7 @@ export class SessionTransport {
   private activityEndpointFile: () => { baseUrl: string; token: string } | null;
   private captureObserver?: CaptureObserverSink;
   private listProcesses?: NativeProcessLister;
+  private vibePaneProof?: SessionTransportDeps["vibePaneProof"];
 
   constructor(deps: SessionTransportDeps) {
     this.db = deps.db;
@@ -583,6 +586,7 @@ export class SessionTransport {
     this.activityEndpointFile = deps.activityEndpointFile ?? (() => null);
     this.captureObserver = deps.captureObserver;
     this.listProcesses = deps.listProcesses;
+    this.vibePaneProof = deps.vibePaneProof;
   }
 
   /**
@@ -1457,6 +1461,14 @@ export class SessionTransport {
       const native = await verifyCodexPaneProcess({ target: sessionName, tmux: this.tmuxAdapter,
         listProcesses: this.listProcesses, expectedToken: resumeToken });
       if (native && await this.tmuxAdapter.getPanePid(pane).catch(() => null) === native.panePid) return null;
+    }
+    if (runtime === "vibe" && pane && this.vibePaneProof) {
+      // Same wrapper class as Codex above (f8f3aff6): the daemon's /bin/sh launch
+      // script is the pane foreground while vibe runs as its child. Vibe rewrites
+      // its argv, so the proof is its session lock's holder pid in this pane's
+      // foreground lineage — for the seat's recorded session when one is known.
+      const proof = await this.vibePaneProof(sessionName, resumeToken).catch(() => null);
+      if (proof && await this.tmuxAdapter.getPanePid(pane).catch(() => null) === proof.panePid) return null;
     }
     return paneCommand.replace(/^-/, "");
   }

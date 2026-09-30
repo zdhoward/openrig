@@ -19,6 +19,8 @@ import type { WatchdogHistoryEntry } from "../src/domain/watchdog-history-log.js
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 import { createFullTestDb } from "./helpers/test-app.js";
 import type { NativeProcessRow } from "../src/domain/native-process-lineage.js";
+import { VibeRuntimeAdapter } from "../src/adapters/vibe-runtime-adapter.js";
+import type { VibeProcessRow } from "../src/adapters/vibe-pane-process.js";
 
 function tmuxWithPane(getPaneCommand: () => Promise<string | null>) {
   const sendText = vi.fn(async () => ({ ok: true as const }));
@@ -161,6 +163,79 @@ describe("#142 transport refuses to type into a bare shell where an agent runtim
     expect(await watchdogSend(transport, "dev-check@my-rig")).toMatchObject({ ok: false, sent: false, reason: "target_runtime_not_running" });
     expect(sendText).not.toHaveBeenCalled();
     expect(sendKeys).not.toHaveBeenCalled();
+  });
+
+  // Vibe behind the same daemon /bin/sh launch wrapper (live-verified on
+  // mistral-vibe 2.25.8: pane_current_command "sh", child argv "Vibe CLI").
+  // The proof is the seat session's lock holder pid in the pane's foreground lineage.
+  const vibeToken = "3961f82a-6eb7-448b-13bc-17e011aad77e";
+  const otherVibeToken = "83547853-f4fc-5b98-c037-0d275b0f747d";
+  const vibeRoot = "/home/user/.vibe/logs/session";
+  function vibeRows(): VibeProcessRow[] {
+    return [
+      { pid: 1135, ppid: 1, pgid: 1135, tpgid: 1196 },
+      { pid: 1196, ppid: 1135, pgid: 1196, tpgid: 1196 },
+      { pid: 1205, ppid: 1196, pgid: 1196, tpgid: 1196 },
+      { pid: 2205, ppid: 1, pgid: 2205, tpgid: -1 },
+    ];
+  }
+  function vibeLock(id: string, pid: number) {
+    return `{"acquired_at":"2026-09-30T14:56:20.976Z","lease_version":1,"process_id":${pid},"session_id":"${id}"}\n`;
+  }
+  function wrappedVibeSeat(opts: { rows?: VibeProcessRow[]; locks?: Record<string, string>; withProof?: boolean } = {}) {
+    const { node, session } = seat("vibe", "dev-solo@my-rig");
+    sessionRegistry.updateBinding(node.id, { tmuxSession: "dev-solo@my-rig", tmuxPane: "%1" });
+    sessionRegistry.updateResumeToken(session.id, "vibe_session_id", vibeToken);
+    const ports = tmuxWithPane(async () => "sh");
+    ports.tmux.getPanePid = vi.fn(async () => 1135);
+    const files = opts.locks ?? { [`${vibeRoot}/active/${vibeToken}.lock.json`]: vibeLock(vibeToken, 1205) };
+    const vibe = new VibeRuntimeAdapter({
+      tmux: ports.tmux,
+      fsOps: {
+        readFile: (p: string) => { if (!(p in files)) throw new Error("ENOENT"); return files[p]!; },
+        writeFile: () => {}, mkdirp: () => {},
+        exists: (p: string) => p in files,
+        readdir: (dir: string) => Object.keys(files).filter((f) => f.startsWith(`${dir}/`)).map((f) => f.slice(dir.length + 1)),
+      },
+      sessionStoreRoot: vibeRoot,
+      listProcesses: () => opts.rows ?? vibeRows(),
+    });
+    const deps = { db, rigRepo, sessionRegistry, tmuxAdapter: ports.tmux, sleep: async () => {},
+      ...(opts.withProof === false ? {} : { vibePaneProof: (t: string, id: string | null) => vibe.provePaneOccupancy(t, id) }) };
+    return { ...ports, node, session, transport: new SessionTransport(deps) };
+  }
+
+  it.each(["ordinary verified send", "watchdog wake"])("wrapped vibe (proven by its session lock) receives %s", async kind => {
+    const { transport, sendText, sendKeys } = wrappedVibeSeat();
+    const result = kind === "watchdog wake"
+      ? await watchdogSend(transport, "dev-solo@my-rig")
+      : await transport.send("dev-solo@my-rig", "existing review", { verify: true });
+    expect(result.ok).toBe(true);
+    expect(sendText).toHaveBeenCalledOnce();
+    expect(sendKeys).toHaveBeenCalledOnce();
+  });
+
+  const vibeUnproved: [string, Parameters<typeof wrappedVibeSeat>[0]][] = [
+    ["exited vibe with a stale lock", { rows: vibeRows().slice(0, -2) }],
+    ["no session lock at all", { locks: {} }],
+    ["background vibe", { rows: vibeRows().map(r => r.pid === 1205 ? { ...r, pgid: 999 } : r) }],
+    ["another pane's vibe", { locks: { [`${vibeRoot}/active/${vibeToken}.lock.json`]: vibeLock(vibeToken, 2205) } }],
+    ["a different session than recorded (e.g. vibe fell back to fresh on a bad resume)",
+      { locks: { [`${vibeRoot}/active/${otherVibeToken}.lock.json`]: vibeLock(otherVibeToken, 1205) } }],
+    ["no vibe proof wired", { withProof: false }],
+  ];
+  it.each(vibeUnproved)("shell label still refuses vibe with %s", async (_name, opts) => {
+    const { transport, sendText, sendKeys } = wrappedVibeSeat(opts);
+    expect(await watchdogSend(transport, "dev-solo@my-rig")).toMatchObject({ ok: false, sent: false, reason: "target_runtime_not_running" });
+    expect(sendText).not.toHaveBeenCalled();
+    expect(sendKeys).not.toHaveBeenCalled();
+  });
+
+  it("refuses a proven vibe when the bound pane is a different pane", async () => {
+    const { transport, tmux, sendText } = wrappedVibeSeat();
+    tmux.getPanePid = async target => target === "%1" ? 999 : 1135;
+    expect(await watchdogSend(transport, "dev-solo@my-rig")).toMatchObject({ ok: false, reason: "target_runtime_not_running" });
+    expect(sendText).not.toHaveBeenCalled();
   });
 
   it("negative: a terminal node's shell is its runtime, so it still receives text", async () => {
