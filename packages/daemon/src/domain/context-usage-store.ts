@@ -3,6 +3,7 @@ import { join } from "node:path";
 import os from "node:os";
 import { closeSync, existsSync, openSync, readFileSync, readSync, statSync, unlinkSync } from "node:fs";
 import { resolveCodexDbPaths } from "./codex-thread-id.js";
+import { VibeSessionStore } from "../adapters/vibe-session-store.js";
 import type { ContextUsage, ContextUnknownReason } from "./types.js";
 import { parseSqliteUtcMs } from "./sqlite-time.js";
 import {
@@ -17,6 +18,8 @@ export const FRESHNESS_THRESHOLD_MS = 600_000; // 10 minutes per PM spec
 export interface ContextUsageStoreOpts {
   stateDir: string;
   codexHomeDir?: string | null;
+  /** <VIBE_HOME>/logs/session; absent = vibe context usage stays unknown. */
+  vibeSessionStoreRoot?: string | null;
   // GHOST-STAGE (c-id): resolve the LIVE occupant's boot time (atom-B tenure) for a node, so a
   // reading sampled BEFORE the current occupant booted (a prior generation) is rejected instead of
   // driving the threshold. null = UNKNOWN → the gate is inert (note-2).
@@ -85,12 +88,20 @@ export class ContextUsageStore {
   readonly db: Database.Database;
   private stateDir: string;
   private codexHomeDir: string | null;
+  private vibeStore: VibeSessionStore | null;
 
   private readonly resolveOccupantBootAt?: (nodeId: string) => string | null;
   constructor(db: Database.Database, opts: ContextUsageStoreOpts) {
     this.db = db;
     this.stateDir = opts.stateDir;
     this.codexHomeDir = opts.codexHomeDir ?? safeHomeDir();
+    this.vibeStore = opts.vibeSessionStoreRoot
+      ? new VibeSessionStore({
+          readFile: (path) => readFileSync(path, "utf-8"),
+          exists: existsSync,
+          mtimeMs: (path) => statSync(path).mtimeMs,
+        }, opts.vibeSessionStoreRoot)
+      : null;
     this.resolveOccupantBootAt = opts.resolveOccupantBootAt;
   }
 
@@ -180,6 +191,34 @@ export class ContextUsageStore {
       threadId,
       transcriptPath: thread.rollout_path,
     });
+  }
+
+  /** Read a vibe seat's latest checkpointed context size and normalize it.
+   *  The denominator is vibe's auto-compaction threshold (what vibe's own
+   *  status bar shows), so the percentage is "how close to compaction". */
+  readVibeAndNormalize(input: { sessionId: string | null | undefined; sessionName: string }): ContextUsage {
+    const sessionId = input.sessionId?.trim();
+    if (!sessionId || !this.vibeStore) return this.unknownUsage("no_data");
+    const read = this.vibeStore.readContextSample(sessionId);
+    if (!read.ok) return this.unknownUsage(read.reason);
+    const { contextTokens, compactionThreshold, sampledAt } = read.sample;
+    const usedPercentage = clampPercentage(Math.round((contextTokens / compactionThreshold) * 100));
+    return {
+      availability: "known",
+      reason: null,
+      source: "vibe_session_checkpoint",
+      usedPercentage,
+      remainingPercentage: clampPercentage(100 - usedPercentage),
+      contextWindowSize: compactionThreshold,
+      totalInputTokens: null,
+      totalOutputTokens: null,
+      currentUsage: null,
+      transcriptPath: null,
+      sessionId,
+      sessionName: input.sessionName,
+      sampledAt,
+      fresh: sampledAt ? this.isFresh(sampledAt) : false,
+    };
   }
 
   /** Resolve an explicitly selected native thread, even before its first token count. */

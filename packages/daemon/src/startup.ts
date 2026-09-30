@@ -978,6 +978,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   const { ContextUsageStore } = await import("./domain/context-usage-store.js");
   const contextUsageStore = new ContextUsageStore(db, {
     stateDir: OPENRIG_HOME,
+    vibeSessionStoreRoot,
     // GHOST-STAGE (c-id): reject context readings from before the live occupant booted (prior
     // generation) so a frozen pre-handover sample can't drive the threshold. null = UNKNOWN (inert).
     resolveOccupantBootAt: (nodeId) => sessionRegistry.currentOccupantTenure(nodeId)?.bootAt ?? null,

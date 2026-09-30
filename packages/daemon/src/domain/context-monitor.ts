@@ -205,6 +205,7 @@ export class ContextMonitor {
       WHERE (
           (n.runtime = 'claude-code' AND s.status = 'running')
           OR (n.runtime = 'stub' AND s.status = 'running')
+          OR (n.runtime = 'vibe' AND s.status = 'running' AND s.resume_token IS NOT NULL)
           OR (
             n.runtime = 'codex'
             AND (
@@ -222,6 +223,13 @@ export class ContextMonitor {
     if (session.runtime === "codex") {
       return this.store.readCodexAndNormalize({
         threadId: session.resume_token,
+        sessionName: session.session_name,
+      });
+    }
+
+    if (session.runtime === "vibe") {
+      return this.store.readVibeAndNormalize({
+        sessionId: session.resume_token,
         sessionName: session.session_name,
       });
     }
