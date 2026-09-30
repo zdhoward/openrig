@@ -38,7 +38,8 @@ import type { ProjectionPlan, ProjectionEntry } from "../domain/projection-plann
 import { validateResumeToken } from "../domain/resume-token-validation.js";
 import { mergeManagedBlock } from "../domain/managed-blocks.js";
 import { observeVibeAgentProfile } from "../domain/permission-drift.js";
-import { VibeSessionStore } from "./vibe-session-store.js";
+import { VibeSessionStore, type VibeSessionLock } from "./vibe-session-store.js";
+import { listVibeProcessRows, pidOwnedByPane, type VibeProcessLister } from "./vibe-pane-process.js";
 
 const SHELL_COMMANDS = new Set(["bash", "fish", "nu", "sh", "tmux", "zsh"]);
 
@@ -98,6 +99,8 @@ export interface VibeRuntimeAdapterDeps {
   sleep?: (ms: number) => Promise<void>;
   /** Clock injection for launch-scoped capture (tests). */
   now?: () => string;
+  /** Process table for pane-ownership proof of a captured lock (tests). */
+  listProcesses?: VibeProcessLister;
 }
 
 export class VibeRuntimeAdapter implements RuntimeAdapter {
@@ -110,6 +113,7 @@ export class VibeRuntimeAdapter implements RuntimeAdapter {
   private trustManagedCwd: boolean;
   private sleep: (ms: number) => Promise<void>;
   private now: () => string;
+  private listProcesses: VibeProcessLister;
 
   constructor(deps: VibeRuntimeAdapterDeps) {
     this.tmux = deps.tmux;
@@ -123,6 +127,7 @@ export class VibeRuntimeAdapter implements RuntimeAdapter {
     this.trustManagedCwd = deps.trustManagedCwd ?? true;
     this.sleep = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.now = deps.now ?? (() => new Date().toISOString());
+    this.listProcesses = deps.listProcesses ?? listVibeProcessRows;
   }
 
   async listInstalled(binding: NodeBinding): Promise<InstalledResource[]> {
@@ -264,13 +269,16 @@ export class VibeRuntimeAdapter implements RuntimeAdapter {
         return this.registryShapeFailure(registryBefore.malformed[0]!);
       }
       const snapshot = new Set(registryBefore.locks.map((lock) => lock.sessionId));
+      // Sessions already persisted before this launch can never be the seat's
+      // NEW session — vibe's output-cleanup sweep leases them at startup.
+      const storedBefore = this.store.listStoredSessionIds();
 
       const textResult = await this.tmux.sendShellCommand(sessionName, cmd);
       if (!textResult.ok) {
         return { ok: false, error: `Failed to send launch command: ${textResult.message}` };
       }
 
-      const capture = await this.waitForSessionCapture(snapshot, launchStartedAt, opts.resumeToken ?? undefined);
+      const capture = await this.waitForSessionCapture(sessionName, snapshot, storedBefore, launchStartedAt, opts.resumeToken ?? undefined);
       if (!capture.ok) return capture.failure;
 
       return { ok: true, resumeToken: capture.sessionId, resumeType: "vibe_session_id", appliedLaunch };
@@ -327,13 +335,28 @@ export class VibeRuntimeAdapter implements RuntimeAdapter {
     };
   }
 
+  // Capture evidence = a lock that is (a) launch-scoped, (b) held by a process
+  // in THIS seat pane's foreground lineage (lock process_id -> pane pid), and,
+  // for a fresh launch, (c) not a session persisted before the launch. Locks
+  // failing (b)/(c) belong to other vibe processes or to the maintenance
+  // sweep and are ignored — never guessed at, never counted as ambiguity.
   private async waitForSessionCapture(
+    sessionName: string,
     snapshot: Set<string>,
+    storedBefore: Set<string>,
     launchStartedAt: string,
     expectedSessionId?: string,
   ): Promise<{ ok: true; sessionId: string } | { ok: false; failure: HarnessLaunchResult }> {
     const pollMs = 250;
     const attempts = 60; // ~15s: vibe TUI boot + session lock acquisition
+    let panePid: number | null = null;
+    const ownedByPane = async (locks: VibeSessionLock[]): Promise<VibeSessionLock[]> => {
+      if (locks.length === 0) return [];
+      panePid ??= await this.tmux.getPanePid(sessionName).catch(() => null);
+      if (panePid == null) return [];
+      const rows = await this.listProcesses();
+      return locks.filter((lock) => pidOwnedByPane(rows, panePid!, lock.processId));
+    };
     for (let attempt = 0; attempt < attempts; attempt++) {
       const registry = this.store.listRegistry();
       if (registry.malformed.length > 0) {
@@ -346,12 +369,17 @@ export class VibeRuntimeAdapter implements RuntimeAdapter {
       if (expectedSessionId) {
         // Resume verification: THIS attempt must observe the persisted id
         // come back active (a lock re-acquired after launch start).
-        const match = active.find((lock) => lock.sessionId === expectedSessionId);
-        if (match && match.acquiredAt >= launchStartedAt) {
+        const candidates = active.filter((lock) => lock.sessionId === expectedSessionId && lock.acquiredAt >= launchStartedAt);
+        const [match] = await ownedByPane(candidates);
+        if (match) {
           return { ok: true, sessionId: match.sessionId };
         }
       } else {
-        const fresh = active.filter((lock) => !snapshot.has(lock.sessionId) && lock.acquiredAt >= launchStartedAt);
+        const candidates = active.filter((lock) =>
+          !snapshot.has(lock.sessionId)
+          && lock.acquiredAt >= launchStartedAt
+          && !storedBefore.has(lock.sessionId.toLowerCase()));
+        const fresh = await ownedByPane(candidates);
         const [first] = fresh;
         if (fresh.length === 1 && first) {
           return { ok: true, sessionId: first.sessionId };

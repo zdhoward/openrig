@@ -25,8 +25,26 @@ const VIBE_FLOOR_EFFECT = {
   value: "accept-edits",
 } as const;
 
-function lock(sessionId: string, acquiredAt: string): string {
-  return JSON.stringify({ acquired_at: acquiredAt, lease_version: 1, process_id: 1, session_id: sessionId });
+// Live-shaped pane trees (2.25.8 via the daemon): bash (pane) -> /bin/sh
+// launch wrapper -> "Vibe CLI", all in the wrapper's foreground group.
+// seat-2's pane mirrors it; FOREIGN_PID is a vibe outside any seat pane.
+const PANE_PID = 100;
+const VIBE_PID = 201;
+const PANE2_PID = 300;
+const VIBE2_PID = 401;
+const FOREIGN_PID = 901;
+const ROWS = [
+  { pid: PANE_PID, ppid: 1, pgid: PANE_PID, tpgid: 200 },
+  { pid: 200, ppid: PANE_PID, pgid: 200, tpgid: 200 },
+  { pid: VIBE_PID, ppid: 200, pgid: 200, tpgid: 200 },
+  { pid: PANE2_PID, ppid: 1, pgid: PANE2_PID, tpgid: 400 },
+  { pid: 400, ppid: PANE2_PID, pgid: 400, tpgid: 400 },
+  { pid: VIBE2_PID, ppid: 400, pgid: 400, tpgid: 400 },
+  { pid: FOREIGN_PID, ppid: 1, pgid: FOREIGN_PID, tpgid: -1 },
+];
+
+function lock(sessionId: string, acquiredAt: string, processId = VIBE_PID): string {
+  return JSON.stringify({ acquired_at: acquiredAt, lease_version: 1, process_id: processId, session_id: sessionId });
 }
 
 function mockTmux(sent: string[] = [], afterSend?: () => void, sendOk = true) {
@@ -41,6 +59,7 @@ function mockTmux(sent: string[] = [], afterSend?: () => void, sendOk = true) {
     capturePaneContent: vi.fn(async () => ""),
     hasSession: vi.fn(async () => true),
     getPaneCommand: vi.fn(async () => "python"),
+    getPanePid: vi.fn(async (target: string) => (target === "seat-2" ? PANE2_PID : PANE_PID)),
   } as unknown as TmuxAdapter;
 }
 
@@ -73,7 +92,7 @@ function memFs(files: Record<string, string> = {}) {
 function adapterWith(fs: VibeAdapterFsOps, tmux: TmuxAdapter) {
   return new VibeRuntimeAdapter({
     tmux, fsOps: fs, sessionStoreRoot: STORE_ROOT,
-    sleep: async () => {}, now: () => T1,
+    sleep: async () => {}, now: () => T1, listProcesses: () => ROWS,
   });
 }
 
@@ -199,7 +218,7 @@ describe("vibe-runtime-adapter — honest refusals (contract)", () => {
 describe("vibe-runtime-adapter — registry-diff token capture", () => {
   it("captures the single NEW session lock as the resume token", async () => {
     const sent: string[] = [];
-    const fs = memFs({ [`${ACTIVE}/old.lock.json`]: lock(UUID_B, "2026-09-29T09:00:00Z") });
+    const fs = memFs({ [`${ACTIVE}/${UUID_B}.lock.json`]: lock(UUID_B, "2026-09-29T09:00:00Z") });
     const tmux = mockTmux(sent, () => {
       (fs as unknown as { files: Record<string, string> }).files[`${ACTIVE}/${UUID_A}.lock.json`] = lock(UUID_A, T1);
     });
@@ -296,84 +315,171 @@ describe("vibe-runtime-adapter — projection + delivery", () => {
     ]);
   });
 });
-describe("vibe-runtime-adapter — capture mutex (review ruling 1)", () => {
-  it("two CONCURRENT fresh launches each capture their own session (no ambiguity refusal)", async () => {
-    const fs = memFs();
-    let sendCount = 0;
-    const sent: string[] = [];
-    const tmux = mockTmux(sent, () => {
-      sendCount += 1;
-      const files = (fs as unknown as { files: Record<string, string> }).files;
-      // Seat 1's vibe acquires session A, then seat 2's acquires session B.
-      const id = sendCount === 1 ? UUID_A : UUID_B;
-      files[`${ACTIVE}/${id}.lock.json`] = lock(id, T1);
-    });
-    const adapter = adapterWith(fs, tmux);
-    const [r1, r2] = await Promise.all([
-      adapter.launchHarness({ ...SEAT, tmuxSession: "seat-1" }, { name: "seat-1" }),
-      adapter.launchHarness({ ...SEAT, tmuxSession: "seat-2" }, { name: "seat-2" }),
-    ]);
-    expect(r1.ok).toBe(true);
-    expect(r2.ok).toBe(true);
-    if (r1.ok && r2.ok) {
-      expect(r1.resumeToken).toBe(UUID_A);
-      expect(r2.resumeToken).toBe(UUID_B);
-    }
-  });
-
-  it("a FAILED launch releases the capture mutex for the next launch", async () => {
-    const fs = memFs();
-    const sent: string[] = [];
-    let sendOk = false;
-    const tmux = {
-      sendShellCommand: vi.fn(async (_t: string, command: string): Promise<TmuxResult> => {
-        sent.push(command);
-        if (sendOk) {
-          (fs as unknown as { files: Record<string, string> }).files[`${ACTIVE}/${UUID_A}.lock.json`] = lock(UUID_A, T1);
-        }
-        return sendOk ? { ok: true as const } : { ok: false as const, message: "tmux down" };
-      }),
-      sendText: vi.fn(async () => ({ ok: true as const })),
-      sendKeys: vi.fn(async () => ({ ok: true as const })),
-      capturePaneContent: vi.fn(async () => ""),
-      hasSession: vi.fn(async () => true),
-      getPaneCommand: vi.fn(async () => "python"),
-    } as unknown as TmuxAdapter;
-    const adapter = adapterWith(fs, tmux);
-    const failed = await adapter.launchHarness({ ...SEAT }, { name: "seat-a" });
-    expect(failed.ok).toBe(false);
-    sendOk = true;
-    const next = await adapter.launchHarness({ ...SEAT }, { name: "seat-a" });
-    expect(next.ok).toBe(true);
-  });
-});
-
-describe("vibe-runtime-adapter — registry compat boundary (review ruling 4)", () => {
-  it("a malformed lock (invalid JSON) fails LOUD with attention_required, never silently \"no session\"", async () => {
-    const fs = memFs({ [`${ACTIVE}/broken.lock.json`]: "{not json" });
-    const adapter = adapterWith(fs, mockTmux());
-    const result = await adapter.launchHarness({ ...SEAT }, { name: "seat-a" });
-    expect(result.ok).toBe(false);
-    if (!result.ok) {
-      expect(result.error).toContain("registry shape changed");
-      expect(result.error).toContain("invalid_json");
-      expect(result.recovery).toBe("attention_required");
-    }
-  });
-
-  it("a lock missing session_id fails loud as a shape change", async () => {
-    const fs = memFs({ [`${ACTIVE}/nosession.lock.json`]: JSON.stringify({ acquired_at: T1 }) });
-    const adapter = adapterWith(fs, mockTmux());
-    const result = await adapter.launchHarness({ ...SEAT }, { name: "seat-a" });
-    expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.error).toContain("missing_session_id");
-  });
-
-  it("a lock whose session_id is not a UUID fails loud as a shape change", async () => {
-    const fs = memFs({ [`${ACTIVE}/weird.lock.json`]: JSON.stringify({ acquired_at: T1, session_id: "not-a-uuid" }) });
-    const adapter = adapterWith(fs, mockTmux());
-    const result = await adapter.launchHarness({ ...SEAT }, { name: "seat-a" });
-    expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.error).toContain("invalid_session_id");
-  });
-});
+describe("vibe-runtime-adapter — capture mutex (review ruling 1)", () => {
+  it("two CONCURRENT fresh launches each capture their own session (no ambiguity refusal)", async () => {
+    const fs = memFs();
+    let sendCount = 0;
+    const sent: string[] = [];
+    const tmux = mockTmux(sent, () => {
+      sendCount += 1;
+      const files = (fs as unknown as { files: Record<string, string> }).files;
+      // Seat 1's vibe acquires session A, then seat 2's acquires session B.
+      const id = sendCount === 1 ? UUID_A : UUID_B;
+      files[`${ACTIVE}/${id}.lock.json`] = lock(id, T1, sendCount === 1 ? VIBE_PID : VIBE2_PID);
+    });
+    const adapter = adapterWith(fs, tmux);
+    const [r1, r2] = await Promise.all([
+      adapter.launchHarness({ ...SEAT, tmuxSession: "seat-1" }, { name: "seat-1" }),
+      adapter.launchHarness({ ...SEAT, tmuxSession: "seat-2" }, { name: "seat-2" }),
+    ]);
+    expect(r1.ok).toBe(true);
+    expect(r2.ok).toBe(true);
+    if (r1.ok && r2.ok) {
+      expect(r1.resumeToken).toBe(UUID_A);
+      expect(r2.resumeToken).toBe(UUID_B);
+    }
+  });
+
+  it("a FAILED launch releases the capture mutex for the next launch", async () => {
+    const fs = memFs();
+    const sent: string[] = [];
+    let sendOk = false;
+    const tmux = {
+      sendShellCommand: vi.fn(async (_t: string, command: string): Promise<TmuxResult> => {
+        sent.push(command);
+        if (sendOk) {
+          (fs as unknown as { files: Record<string, string> }).files[`${ACTIVE}/${UUID_A}.lock.json`] = lock(UUID_A, T1);
+        }
+        return sendOk ? { ok: true as const } : { ok: false as const, message: "tmux down" };
+      }),
+      sendText: vi.fn(async () => ({ ok: true as const })),
+      sendKeys: vi.fn(async () => ({ ok: true as const })),
+      capturePaneContent: vi.fn(async () => ""),
+      hasSession: vi.fn(async () => true),
+      getPaneCommand: vi.fn(async () => "python"),
+      getPanePid: vi.fn(async () => PANE_PID),
+    } as unknown as TmuxAdapter;
+    const adapter = adapterWith(fs, tmux);
+    const failed = await adapter.launchHarness({ ...SEAT }, { name: "seat-a" });
+    expect(failed.ok).toBe(false);
+    sendOk = true;
+    const next = await adapter.launchHarness({ ...SEAT }, { name: "seat-a" });
+    expect(next.ok).toBe(true);
+  });
+});
+
+describe("vibe-runtime-adapter — registry compat boundary (review ruling 4)", () => {
+  it("a malformed lock (invalid JSON) fails LOUD with attention_required, never silently \"no session\"", async () => {
+    const fs = memFs({ [`${ACTIVE}/${UUID_B}.lock.json`]: "{not json" });
+    const adapter = adapterWith(fs, mockTmux());
+    const result = await adapter.launchHarness({ ...SEAT }, { name: "seat-a" });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toContain("registry shape changed");
+      expect(result.error).toContain("invalid_json");
+      expect(result.recovery).toBe("attention_required");
+    }
+  });
+
+  it("a lock missing session_id fails loud as a shape change", async () => {
+    const fs = memFs({ [`${ACTIVE}/${UUID_B}.lock.json`]: JSON.stringify({ acquired_at: T1 }) });
+    const adapter = adapterWith(fs, mockTmux());
+    const result = await adapter.launchHarness({ ...SEAT }, { name: "seat-a" });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toContain("missing_session_id");
+  });
+
+  it("a lock whose session_id is not a UUID fails loud as a shape change", async () => {
+    const fs = memFs({ [`${ACTIVE}/${UUID_B}.lock.json`]: JSON.stringify({ acquired_at: T1, session_id: "not-a-uuid" }) });
+    const adapter = adapterWith(fs, mockTmux());
+    const result = await adapter.launchHarness({ ...SEAT }, { name: "seat-a" });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toContain("invalid_session_id");
+  });
+});
+
+// Live-verification captures (mistral-vibe 2.25.8, unified harness): the
+// verbatim lock shapes observed in <VIBE_HOME>/logs/session/active/.
+const LIVE_SESSION_LOCK = (id: string, pid: number) =>
+  `{"acquired_at":"${T1}","lease_version":1,"process_id":${pid},"session_id":"${id}"}\n`;
+const LIVE_CLEANUP_LOCK = (pid: number) =>
+  `{"acquired_at":"${T1}","lease_version":1,"process_id":${pid},"session_id":"process-output-cleanup"}\n`;
+
+describe("vibe-runtime-adapter — registry classification by filename (live finding)", () => {
+  it("ignores vibe's own process-output-cleanup lease beside the new session (was a false shape-change refusal)", async () => {
+    const fs = memFs();
+    const tmux = mockTmux([], () => {
+      fs.files[`${ACTIVE}/${UUID_A}.lock.json`] = LIVE_SESSION_LOCK(UUID_A, VIBE_PID);
+      fs.files[`${ACTIVE}/process-output-cleanup.lock.json`] = LIVE_CLEANUP_LOCK(VIBE_PID);
+    });
+    const result = await adapterWith(fs, tmux).launchHarness({ ...SEAT }, { name: "seat-a" });
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.resumeToken).toBe(UUID_A);
+  });
+
+  it("a cleanup lease present BEFORE the launch does not block it either", async () => {
+    const fs = memFs({ [`${ACTIVE}/process-output-cleanup.lock.json`]: LIVE_CLEANUP_LOCK(FOREIGN_PID) });
+    const tmux = mockTmux([], () => { fs.files[`${ACTIVE}/${UUID_A}.lock.json`] = LIVE_SESSION_LOCK(UUID_A, VIBE_PID); });
+    const result = await adapterWith(fs, tmux).launchHarness({ ...SEAT }, { name: "seat-a" });
+    expect(result.ok).toBe(true);
+  });
+
+  it("a UUID-named lock with a mismatched session_id still fails LOUD", async () => {
+    const fs = memFs({ [`${ACTIVE}/${UUID_B}.lock.json`]: LIVE_SESSION_LOCK(UUID_A, VIBE_PID) });
+    const result = await adapterWith(fs, mockTmux()).launchHarness({ ...SEAT }, { name: "seat-a" });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toContain("session_id_mismatch");
+      expect(result.recovery).toBe("attention_required");
+    }
+  });
+
+  it("a lock name that is neither a UUID nor a vibe lease id still fails LOUD", async () => {
+    const fs = memFs({ [`${ACTIVE}/not.a.lease.lock.json`]: LIVE_CLEANUP_LOCK(VIBE_PID) });
+    const result = await adapterWith(fs, mockTmux()).launchHarness({ ...SEAT }, { name: "seat-a" });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toContain("unrecognized_lock_name");
+  });
+});
+
+describe("vibe-runtime-adapter — pane-ownership + stored-session capture proof (live finding)", () => {
+  it("ignores a new lock held by a vibe OUTSIDE the seat pane; captures the seat's own", async () => {
+    const fs = memFs();
+    const tmux = mockTmux([], () => {
+      fs.files[`${ACTIVE}/${UUID_B}.lock.json`] = LIVE_SESSION_LOCK(UUID_B, FOREIGN_PID);
+      fs.files[`${ACTIVE}/${UUID_A}.lock.json`] = LIVE_SESSION_LOCK(UUID_A, VIBE_PID);
+    });
+    const result = await adapterWith(fs, tmux).launchHarness({ ...SEAT }, { name: "seat-a" });
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.resumeToken).toBe(UUID_A);
+  });
+
+  it("NEVER captures a lock held outside the pane — honest timeout instead of a wrong id", async () => {
+    const fs = memFs();
+    const tmux = mockTmux([], () => { fs.files[`${ACTIVE}/${UUID_B}.lock.json`] = LIVE_SESSION_LOCK(UUID_B, FOREIGN_PID); });
+    const result = await adapterWith(fs, tmux).launchHarness({ ...SEAT }, { name: "seat-a" });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.recovery).toBe("attention_required");
+  });
+
+  it("excludes a stored session leased by the seat's OWN vibe (startup cleanup sweep) — no ambiguity", async () => {
+    const fs = memFs({ [`${STORE_ROOT}/unified/${UUID_B}/meta.json`]: "{}" });
+    const listAll = fs.readdir!;
+    fs.readdir = (dir: string) => (dir.replace(/\\/g, "/").endsWith("/unified") ? [UUID_B] : listAll(dir));
+    const tmux = mockTmux([], () => {
+      fs.files[`${ACTIVE}/${UUID_A}.lock.json`] = LIVE_SESSION_LOCK(UUID_A, VIBE_PID);
+      fs.files[`${ACTIVE}/${UUID_B}.lock.json`] = LIVE_SESSION_LOCK(UUID_B, VIBE_PID);
+    });
+    const result = await adapterWith(fs, tmux).launchHarness({ ...SEAT }, { name: "seat-a" });
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.resumeToken).toBe(UUID_A);
+  });
+
+  it("resume accepts the persisted id only when re-acquired from the seat pane", async () => {
+    const fs = memFs();
+    const tmux = mockTmux([], () => { fs.files[`${ACTIVE}/${UUID_A}.lock.json`] = LIVE_SESSION_LOCK(UUID_A, FOREIGN_PID); });
+    const result = await adapterWith(fs, tmux).launchHarness({ ...SEAT }, { name: "seat-a", resumeToken: UUID_A });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toContain("never claim a resume");
+  });
+});

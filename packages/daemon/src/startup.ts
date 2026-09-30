@@ -545,7 +545,9 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   });
   const vibeResume = new VibeResumeAdapter(
     tmuxAdapter,
-    { readFile: (p: string) => fs.readFileSync(p, "utf-8"), exists: (p: string) => fs.existsSync(p) },
+    // readdir is required: without it the store reads an empty registry and
+    // every podless vibe resume times out (live-verification finding).
+    { readFile: (p: string) => fs.readFileSync(p, "utf-8"), exists: (p: string) => fs.existsSync(p), readdir: (dir: string) => fs.readdirSync(dir) },
     { sessionStoreRoot: vibeSessionStoreRoot },
   );
   // Services infrastructure (RigEnv) — created early so restore/bootstrap can use it

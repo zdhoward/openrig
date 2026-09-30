@@ -15,6 +15,7 @@ import type { ResumeResult } from "./claude-resume.js";
 import { vibeAgentProfile } from "./yolo-mode.js";
 import { observeVibeAgentProfile } from "../domain/permission-drift.js";
 import { VibeSessionStore, type VibeSessionStoreFs } from "./vibe-session-store.js";
+import { listVibeProcessRows, pidOwnedByPane, type VibeProcessLister } from "./vibe-pane-process.js";
 
 export { type ResumeResult };
 
@@ -26,6 +27,8 @@ export interface VibeResumeOptions {
   trustManagedCwd?: boolean;
   /** Clock injection for launch-scoped verification (tests). */
   now?: () => string;
+  /** Process table for pane-ownership proof of the re-acquired lock (tests). */
+  listProcesses?: VibeProcessLister;
 }
 
 export class VibeResumeAdapter {
@@ -77,6 +80,8 @@ export class VibeResumeAdapter {
   // id must come back ACTIVE with a lock acquired after this resume started.
   // A stale pre-existing lock from a still-running process does not prove the
   // resume landed — the acquired_at timestamp scopes the proof (guard fold).
+  // The lock must also be held from THIS pane's foreground lineage: another
+  // vibe's maintenance sweep can lease the same stored session meanwhile.
   private async verifyResume(tmuxSessionName: string, sessionId: string): Promise<ResumeResult> {
     const pollMs = this.options.pollMs ?? 250;
     const maxWaitMs = this.options.maxWaitMs ?? 15_000;
@@ -84,11 +89,16 @@ export class VibeResumeAdapter {
     const now = this.options.now ?? (() => new Date().toISOString());
     const attempts = Math.max(1, Math.floor(maxWaitMs / Math.max(pollMs, 1)) + 1);
     const resumeStartedAt = now();
+    const listProcesses = this.options.listProcesses ?? listVibeProcessRows;
+    let panePid: number | null = null;
 
     for (let attempt = 0; attempt < attempts; attempt++) {
       const match = this.store.listActiveSessions().find((lock) => lock.sessionId === sessionId);
       if (match && match.acquiredAt >= resumeStartedAt) {
-        return { ok: true };
+        panePid ??= await this.tmux.getPanePid(tmuxSessionName).catch(() => null);
+        if (panePid != null && pidOwnedByPane(await listProcesses(), panePid, match.processId)) {
+          return { ok: true };
+        }
       }
       if (attempt < attempts - 1) {
         await sleepFn(pollMs);

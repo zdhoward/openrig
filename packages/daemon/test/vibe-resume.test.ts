@@ -14,8 +14,20 @@ const UUID_A = "4dd32436-7512-db4b-11ef-7c14fdf5a534";
 const T0 = "2026-09-30T10:00:00Z";
 const T1 = "2026-09-30T10:00:05Z";
 
-function lock(sessionId: string, acquiredAt: string): string {
-  return JSON.stringify({ acquired_at: acquiredAt, lease_version: 1, process_id: 1, session_id: sessionId });
+// Live-shaped pane tree (2.25.8 via the daemon): bash (pane) -> /bin/sh
+// launch wrapper -> "Vibe CLI", all in the wrapper's foreground group.
+const PANE_PID = 100;
+const VIBE_PID = 201;
+const FOREIGN_PID = 901; // another vibe (e.g. its output-cleanup sweep)
+const ROWS = [
+  { pid: PANE_PID, ppid: 1, pgid: PANE_PID, tpgid: 200 },
+  { pid: 200, ppid: PANE_PID, pgid: 200, tpgid: 200 },
+  { pid: VIBE_PID, ppid: 200, pgid: 200, tpgid: 200 },
+  { pid: FOREIGN_PID, ppid: 1, pgid: FOREIGN_PID, tpgid: -1 },
+];
+
+function lock(sessionId: string, acquiredAt: string, processId = VIBE_PID): string {
+  return JSON.stringify({ acquired_at: acquiredAt, lease_version: 1, process_id: processId, session_id: sessionId });
 }
 
 function mockTmux(sent: string[] = [], ok = true) {
@@ -24,6 +36,7 @@ function mockTmux(sent: string[] = [], ok = true) {
       sent.push(command);
       return ok ? { ok: true as const } : { ok: false as const, message: "tmux down" };
     }),
+    getPanePid: vi.fn(async () => PANE_PID),
   } as unknown as TmuxAdapter;
 }
 
@@ -40,7 +53,7 @@ function storeFs(files: Record<string, string>): VibeSessionStoreFs {
 
 function adapterWith(fs: VibeSessionStoreFs, tmux: TmuxAdapter) {
   return new VibeResumeAdapter(tmux, fs, { sessionStoreRoot: STORE_ROOT }, {
-    sleep: async () => {}, now: () => T1,
+    sleep: async () => {}, now: () => T1, listProcesses: () => ROWS,
   });
 }
 
@@ -84,6 +97,13 @@ describe("VibeResumeAdapter — resume", () => {
     const fs = storeFs({ [`${ACTIVE}/${UUID_A}.lock.json`]: lock(UUID_A, T0) });
     const result = await adapterWith(fs, mockTmux(sent)).resume(SEAT, "vibe_session_id", UUID_A, CWD);
     expect(result.ok).toBe(false);
+  });
+
+  it("a lock re-acquired by ANOTHER vibe process (maintenance sweep) is not resume evidence", async () => {
+    const fs = storeFs({ [`${ACTIVE}/${UUID_A}.lock.json`]: lock(UUID_A, T1, FOREIGN_PID) });
+    const result = await adapterWith(fs, mockTmux()).resume(SEAT, "vibe_session_id", UUID_A, CWD);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.code).toBe("resume_failed");
   });
 
   it("surfaces a tmux send failure as resume_failed", async () => {
