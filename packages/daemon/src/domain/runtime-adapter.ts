@@ -20,6 +20,9 @@ export interface NodeBinding extends Binding {
   launchGeneration?: string;
   /** #25: the rig's `managed_blocks.claude-code` file. Absent = CLAUDE.md. Only the Claude adapter reads it. */
   claudeManagedBlockFile?: import("./managed-blocks.js").ClaudeManagedBlockFile;
+  /** Vibe's `--agent` profile for managed launches (ask | plan | accept-edits |
+   *  smart-approve | auto-approve | custom TOML profile name). Only the Vibe adapter reads it. */
+  vibeAgentProfile?: string;
 }
 
 // -- Resolved startup file with source-root provenance --

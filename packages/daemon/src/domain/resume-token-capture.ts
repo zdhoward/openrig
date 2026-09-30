@@ -31,6 +31,11 @@ export interface ResumeTokenCaptureDeps {
   piRunnerStateStore?: {
     readSessionFile(sessionName: string): { ok: true; sessionFile: string } | { ok: false; reason: string };
   } | null;
+  /** Vibe — reads the newest ACTIVE session lock from the vibe session
+   *  registry (a pure file read; the registry is the capture source of truth). */
+  vibeSessionStore?: {
+    readNewestActiveSession(): { ok: true; sessionId: string } | { ok: false; reason: string };
+  } | null;
 }
 
 export type ResumeTokenDeriveResult =
@@ -48,6 +53,7 @@ export type ResumeTokenDeriveResult =
  *   claude-code → the status-line sidecar's session_id (a file read)
  *   codex       → the thread id derived from live pid-keyed logs
  *   pi          → the pi-runner state sidecar's sessionFile (a file read)
+ *   vibe        → the newest active session lock in the vibe registry
  * Returns a structured outcome; never throws for a missing/invalid token
  * (those are honest skips). ANY unexpected throw from a dependency is the
  * caller's to swallow (capture must never fail or block its lifecycle op).
@@ -59,7 +65,7 @@ export async function deriveResumeToken(
   const resumeType = resumeTypeForRuntime(input.runtime);
   if (!resumeType) return { outcome: "exempt" }; // terminal / unknown — exempt, not a failure
 
-  const runtime = input.runtime as string; // non-null: resumeType is set only for claude-code / codex / pi
+  const runtime = input.runtime as string; // non-null: resumeType is set only for claude-code / codex / pi / vibe
 
   let token: string | undefined;
   if (runtime === "claude-code") {
@@ -82,6 +88,14 @@ export async function deriveResumeToken(
       return { outcome: "skipped", reason: state.reason === "parse_error" ? "parse_error" : "missing_sidecar" };
     }
     if (state.sessionFile.trim().length > 0) token = state.sessionFile.trim();
+    else return { outcome: "skipped", reason: "missing_sidecar" };
+  } else if (runtime === "vibe") {
+    if (!deps.vibeSessionStore) return { outcome: "noop" }; // dep absent — silent no-op
+    const active = deps.vibeSessionStore.readNewestActiveSession();
+    if (!active.ok) {
+      return { outcome: "skipped", reason: active.reason === "parse_error" ? "parse_error" : "missing_sidecar" };
+    }
+    if (active.sessionId.trim().length > 0) token = active.sessionId.trim();
     else return { outcome: "skipped", reason: "missing_sidecar" };
   } else {
     return { outcome: "noop" }; // resumeType set but runtime is not one we derive — defensive

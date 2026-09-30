@@ -10,7 +10,7 @@
 // actually resume" probe is intentionally out of scope (heavy + must not
 // mutate live state); format validation is the safe, side-effect-free floor.
 
-export type ResumeType = "claude_id" | "codex_id" | "pi_session_file";
+export type ResumeType = "claude_id" | "codex_id" | "pi_session_file" | "vibe_session_id";
 
 export interface ResumeTokenValidationOk {
   ok: true;
@@ -50,6 +50,7 @@ export function resumeTypeForRuntime(runtime: string | null): ResumeType | null 
   if (runtime === "claude-code") return "claude_id";
   if (runtime === "codex") return "codex_id";
   if (runtime === "pi") return "pi_session_file";
+  if (runtime === "vibe") return "vibe_session_id";
   return null;
 }
 
@@ -88,6 +89,21 @@ function validatePiSessionFileToken(token: string): ResumeTokenValidationOk | Re
   return { ok: true, resumeType: "pi_session_file", token };
 }
 
+// vibe_session_id floor: vibe mints session UUIDs (the registry and
+// meta.json key sessions by them). Format validation only — the token is
+// credential-class and is never echoed in an error message.
+const VIBE_SESSION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function validateVibeSessionIdToken(token: string): ResumeTokenValidationOk | ResumeTokenValidationErr {
+  if (token.length !== 36) {
+    return { ok: false, error: "Vibe session-id token must be a 36-character UUID." };
+  }
+  if (!VIBE_SESSION_ID_RE.test(token)) {
+    return { ok: false, error: "Vibe session-id token is not a UUID (expected 8-4-4-4-12 hexadecimal groups)." };
+  }
+  return { ok: true, resumeType: "vibe_session_id", token };
+}
+
 export function validateResumeToken(
   runtime: string | null,
   rawToken: unknown,
@@ -96,7 +112,7 @@ export function validateResumeToken(
   if (!resumeType) {
     return {
       ok: false,
-      error: `set-resume-token is not supported for runtime "${runtime ?? "unknown"}" (only claude-code, codex, and pi have resume tokens).`,
+      error: `set-resume-token is not supported for runtime "${runtime ?? "unknown"}" (only claude-code, codex, pi, and vibe have resume tokens).`,
     };
   }
   if (typeof rawToken !== "string") {
@@ -108,6 +124,9 @@ export function validateResumeToken(
   }
   if (resumeType === "pi_session_file") {
     return validatePiSessionFileToken(token);
+  }
+  if (resumeType === "vibe_session_id") {
+    return validateVibeSessionIdToken(token);
   }
   return validateIdShapedToken(resumeType, token);
 }

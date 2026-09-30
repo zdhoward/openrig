@@ -1,6 +1,6 @@
 import nodePath from "node:path";
 
-export type AppliedLaunchAxis = "permission" | "sandbox" | "resource_trust" | "not_applicable";
+export type AppliedLaunchAxis = "permission" | "sandbox" | "resource_trust" | "agent_profile" | "not_applicable";
 export type AppliedLaunchState = "observed" | "unknown";
 
 export interface AppliedLaunchObservation {
@@ -101,10 +101,15 @@ export function observePiResourceTrust(trust: "approve" | "no-approve"): Applied
   return { runtime: "pi", axis: "resource_trust", state: "observed", value: trust };
 }
 
+export function observeVibeAgentProfile(profile: string): AppliedLaunchObservation {
+  return { runtime: "vibe", axis: "agent_profile", state: "observed", value: profile };
+}
+
 function runtimeCommand(runtime: string): string | null {
   if (runtime === "claude-code") return "claude";
   if (runtime === "codex") return "codex";
   if (runtime === "pi") return "pi";
+  if (runtime === "vibe") return "vibe";
   return null;
 }
 
@@ -222,7 +227,7 @@ function inspectLaunchBoundRuntime(
   runtime: string,
   applied: AppliedLaunchObservation | null,
 ): RuntimeEnforcementDiagnostic {
-  const axis: AppliedLaunchAxis = runtime === "codex" ? "sandbox" : runtime === "pi" ? "resource_trust" : "not_applicable";
+  const axis: AppliedLaunchAxis = runtime === "codex" ? "sandbox" : runtime === "pi" ? "resource_trust" : runtime === "vibe" ? "agent_profile" : "not_applicable";
   if (!applied || applied.runtime !== runtime || applied.axis !== axis || applied.state !== "observed" || !applied.value) {
     return unknownEnforcement(axis, null, null, applied?.reason ?? "applied_launch_unknown");
   }

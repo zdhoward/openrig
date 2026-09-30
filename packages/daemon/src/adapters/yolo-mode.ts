@@ -78,6 +78,25 @@ export function piTrust(
   return yoloEnabled(env, resolvedPosture) ? "approve" : configured ?? "no-approve";
 }
 
+/** Vibe agent-profile launch axis (vibe's --agent governs approval behavior):
+ *  an explicit per-seat profile wins (validated charset); YOLO / a resolved
+ *  full_bypass policy forces auto-approve; otherwise the configured floor
+ *  (default accept-edits — vibe's own default). Same uniform-posture posture as
+ *  the Claude/Codex/Pi helpers: one decision reused on every managed path. */
+export function vibeAgentProfile(
+  configured: string | undefined,
+  env: NodeJS.ProcessEnv = process.env,
+  resolvedPosture?: ResolvedLaunchPosture,
+  floor?: string,
+): string {
+  if (configured && configured.trim().length > 0) {
+    const profile = configured.trim();
+    if (!/^[A-Za-z][A-Za-z0-9-]*$/.test(profile)) throw new Error("Invalid Vibe agent profile");
+    return profile;
+  }
+  return yoloEnabled(env, resolvedPosture) ? "auto-approve" : floor ?? "accept-edits";
+}
+
 /**
  * OPR.0.5.3.1 — Claude classic-renderer launch env prefix.
  *
