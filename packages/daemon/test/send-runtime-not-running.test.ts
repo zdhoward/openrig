@@ -224,6 +224,15 @@ describe("#142 transport refuses to type into a bare shell where an agent runtim
       { locks: { [`${vibeRoot}/active/${otherVibeToken}.lock.json`]: vibeLock(otherVibeToken, 1205) } }],
     ["no vibe proof wired", { withProof: false }],
   ];
+
+  it("refuses a live vibe when the seat has NO recorded session (failed resume left a fresh placeholder)", async () => {
+    const { transport, session, sendText } = wrappedVibeSeat({
+      locks: { [`${vibeRoot}/active/${otherVibeToken}.lock.json`]: vibeLock(otherVibeToken, 1205) },
+    });
+    sessionRegistry.clearResumeToken(session.id);
+    expect(await watchdogSend(transport, "dev-solo@my-rig")).toMatchObject({ ok: false, reason: "target_runtime_not_running" });
+    expect(sendText).not.toHaveBeenCalled();
+  });
   it.each(vibeUnproved)("shell label still refuses vibe with %s", async (_name, opts) => {
     const { transport, sendText, sendKeys } = wrappedVibeSeat(opts);
     expect(await watchdogSend(transport, "dev-solo@my-rig")).toMatchObject({ ok: false, sent: false, reason: "target_runtime_not_running" });

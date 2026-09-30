@@ -1462,11 +1462,14 @@ export class SessionTransport {
         listProcesses: this.listProcesses, expectedToken: resumeToken });
       if (native && await this.tmuxAdapter.getPanePid(pane).catch(() => null) === native.panePid) return null;
     }
-    if (runtime === "vibe" && pane && this.vibePaneProof) {
+    if (runtime === "vibe" && pane && this.vibePaneProof && resumeToken) {
       // Same wrapper class as Codex above (f8f3aff6): the daemon's /bin/sh launch
       // script is the pane foreground while vibe runs as its child. Vibe rewrites
-      // its argv, so the proof is its session lock's holder pid in this pane's
-      // foreground lineage — for the seat's recorded session when one is known.
+      // its argv, so the proof is the seat's RECORDED session lock held from this
+      // pane's foreground lineage. No recorded token = no proof: vibe capture is
+      // synchronous at launch, so a live seat always has one, while a failed
+      // --resume leaves vibe running a fresh placeholder session (live-verified)
+      // that must never receive traffic as if it were the seat.
       const proof = await this.vibePaneProof(sessionName, resumeToken).catch(() => null);
       if (proof && await this.tmuxAdapter.getPanePid(pane).catch(() => null) === proof.panePid) return null;
     }
