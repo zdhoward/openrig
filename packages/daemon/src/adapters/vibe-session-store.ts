@@ -54,7 +54,28 @@ export interface VibeSessionStoreFs {
   readFile(path: string): string;
   exists(path: string): boolean;
   readdir?(dir: string): string[];
+  /** File modification time (ms since epoch); used to date context samples. */
+  mtimeMs?(path: string): number;
 }
+
+/** A session's latest persisted context size (vibe's own checkpoint). */
+export interface VibeContextSample {
+  sessionId: string;
+  /** Tokens in the model context at the last turn (`last_reported_context_tokens`). */
+  contextTokens: number;
+  /** Vibe's auto-compaction threshold — the denominator vibe's own status bar shows. */
+  compactionThreshold: number;
+  /** Checkpoint write time, ISO-8601; null when the fs cannot stat. */
+  sampledAt: string | null;
+}
+
+export type VibeContextRead =
+  | { ok: true; sample: VibeContextSample }
+  | { ok: false; reason: "no_data" | "parse_error" };
+
+// Verified against mistral-vibe 2.25.8: unified/<id>/CURRENT names the current
+// generation; its checkpoint.json and runtime-state.json hold the figures.
+const UNIFIED_STORE_FORMAT = "mistral.vibe.unified-session-store/v1";
 
 export class VibeSessionStore {
   constructor(
@@ -135,6 +156,49 @@ export class VibeSessionStore {
   /** Active-session locks, parsed and sorted newest-first by acquired_at. */
   listActiveSessions(): VibeSessionLock[] {
     return this.listRegistry().locks;
+  }
+
+  /** Latest context size for a session from its current unified-store
+   *  generation. Missing files are `no_data` (no turn yet / legacy harness);
+   *  an unexpected store format or shape is `parse_error`. */
+  readContextSample(sessionId: string): VibeContextRead {
+    if (!UUID_RE.test(sessionId)) return { ok: false, reason: "no_data" };
+    const sessionDir = joinPath(this.root, "unified", sessionId);
+    const pointerPath = joinPath(sessionDir, "CURRENT");
+    if (!this.fs.exists(pointerPath)) return { ok: false, reason: "no_data" };
+    try {
+      const pointer = JSON.parse(this.fs.readFile(pointerPath)) as { generation?: unknown; store_format?: unknown };
+      const generation = typeof pointer.generation === "string" ? pointer.generation : "";
+      if (pointer.store_format !== UNIFIED_STORE_FORMAT || !/^\d+$/.test(generation)) {
+        return { ok: false, reason: "parse_error" };
+      }
+      const generationDir = joinPath(sessionDir, "generations", generation);
+      const checkpointPath = joinPath(generationDir, "checkpoint.json");
+      const runtimeStatePath = joinPath(generationDir, "runtime-state.json");
+      if (!this.fs.exists(checkpointPath) || !this.fs.exists(runtimeStatePath)) return { ok: false, reason: "no_data" };
+      const checkpoint = JSON.parse(this.fs.readFile(checkpointPath)) as { last_reported_context_tokens?: unknown };
+      const runtimeState = JSON.parse(this.fs.readFile(runtimeStatePath)) as {
+        core_settings?: { context?: { compaction?: { token_threshold?: unknown } } };
+      };
+      const contextTokens = checkpoint.last_reported_context_tokens;
+      const compactionThreshold = runtimeState.core_settings?.context?.compaction?.token_threshold;
+      if (typeof contextTokens !== "number" || contextTokens < 0
+        || typeof compactionThreshold !== "number" || compactionThreshold <= 0) {
+        return { ok: false, reason: "parse_error" };
+      }
+      const mtime = this.fs.mtimeMs?.(checkpointPath);
+      return {
+        ok: true,
+        sample: {
+          sessionId,
+          contextTokens,
+          compactionThreshold,
+          sampledAt: typeof mtime === "number" ? new Date(mtime).toISOString() : null,
+        },
+      };
+    } catch {
+      return { ok: false, reason: "parse_error" };
+    }
   }
 
   /** Whether a session id currently holds an active lock. */
