@@ -348,7 +348,10 @@ export class VibeRuntimeAdapter implements RuntimeAdapter {
     expectedSessionId?: string,
   ): Promise<{ ok: true; sessionId: string } | { ok: false; failure: HarnessLaunchResult }> {
     const pollMs = 250;
-    const attempts = 60; // ~15s: vibe TUI boot + session lock acquisition
+    // ~60s: vibe takes ~5s to acquire its session lock on an idle host but was
+    // measured at ~18s with 12 seats booting on 2 vCPUs. The loop returns as
+    // soon as the lock appears; the bound only delays an honest failure.
+    const attempts = 240;
     let panePid: number | null = null;
     const ownedByPane = async (locks: VibeSessionLock[]): Promise<VibeSessionLock[]> => {
       if (locks.length === 0) return [];
