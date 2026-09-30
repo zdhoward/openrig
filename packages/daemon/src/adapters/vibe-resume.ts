@@ -84,7 +84,7 @@ export class VibeResumeAdapter {
   // vibe's maintenance sweep can lease the same stored session meanwhile.
   private async verifyResume(tmuxSessionName: string, sessionId: string): Promise<ResumeResult> {
     const pollMs = this.options.pollMs ?? 250;
-    const maxWaitMs = this.options.maxWaitMs ?? 15_000;
+    const maxWaitMs = this.options.maxWaitMs ?? 60_000; // matches the adapter capture window
     const sleepFn = this.options.sleep ?? sleep;
     const now = this.options.now ?? (() => new Date().toISOString());
     const attempts = Math.max(1, Math.floor(maxWaitMs / Math.max(pollMs, 1)) + 1);
