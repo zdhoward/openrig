@@ -33,9 +33,23 @@ demo/proof/
 # Build artifacts
 *.tgz
 
-# OPR.0.5.3.7 R2 — the shipped context-pack projection is DERIVED AT PACKAGE TIME
+# OPR.0.5.3.7 R2 - the shipped context-pack projection is DERIVED AT PACKAGE TIME
 # (scripts/generate-context-packs.mjs), never committed or edited in place.
 packages/daemon/context-packs/
 
 # Internal build receipts; never commit
 /.evidence/
+
+# AI ecosystem - local only, never pushed with the fork
+/.gpm/
+/AGENTS.md
+/CLAUDE.md
+/GEMINI.md
+.vibe/
+.codex/
+.cursor/
+.cursorrules
+.windsurf/
+.trae/
+.aider*
+.continue/
